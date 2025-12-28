@@ -22,7 +22,7 @@ public class PDFService {
             PdfWriter.getInstance(document, new FileOutputStream(fileName));
             document.open();
 
-            Font boldFont = new Font(Font.FontFamily.HELVETICA, 12, Font.BOLD);
+            Font boldFont = new Font(Font.FontFamily.HELVETICA, 11, Font.BOLD);
             Font normalFont = new Font(Font.FontFamily.HELVETICA, 10, Font.NORMAL);
             Font smallFont = new Font(Font.FontFamily.HELVETICA, 9, Font.NORMAL);
 
@@ -40,6 +40,11 @@ public class PDFService {
             Paragraph titolo = new Paragraph("DOCUMENTO DI TRASPORTO (D.D.T.)", boldFont);
             titolo.setAlignment(Element.ALIGN_CENTER);
             document.add(titolo);
+
+            Paragraph DPR = new Paragraph("\"D.P.R. 472 del 14/08/1996\"", normalFont);
+            DPR.setAlignment(Element.ALIGN_CENTER);
+            document.add(DPR);
+            document.add(Chunk.NEWLINE);
 
             Paragraph numeroDoc = new Paragraph("N° " + doc.getNumero() + " del " + doc.getData(), normalFont);
             numeroDoc.setAlignment(Element.ALIGN_CENTER);

@@ -29,7 +29,6 @@ public class DataService {
             if (!file.exists()) {
                 List<Bene> beniDefault = new ArrayList<>();
                 beniDefault.add(new Bene("Primer ML50", "lt"));
-                beniDefault.add(new Bene("Lame corrisoglia sentra+ ottone", "ml"));
                 salvaBeni(beniDefault);
                 return beniDefault;
             }

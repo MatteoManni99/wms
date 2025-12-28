@@ -1,10 +1,8 @@
 package gui;
 
 import model.*;
-import org.apache.poi.ss.usermodel.Workbook;
-import org.apache.poi.xssf.usermodel.XSSFWorkbook;
+import service.CsvService;
 import service.DataService;
-import service.ExcelService;
 import service.PDFService;
 
 import javax.swing.*;
@@ -12,36 +10,44 @@ import javax.swing.border.EmptyBorder;
 import javax.swing.table.DefaultTableModel;
 import java.awt.*;
 import java.io.IOException;
+import java.text.ParseException;
 import java.text.SimpleDateFormat;
 import java.util.*;
 import java.util.List;
 
 public class GestioneMagazzinoGUI extends JFrame {
-    private DataService dataService;
-    private ExcelService excelService;
-    private PDFService pdfService;
+    private final DataService dataService;
+    private final CsvService csvService;
+    private final PDFService pdfService;
 
-    private List<Bene> beni;
-    private List<Movimento> movimenti;
-    private DatiStatici datiStatici;
+    private final List<Bene> beni;
+    private final List<Movimento> movimenti;
+    private final DatiStatici datiStatici;
 
     private JTabbedPane tabbedPane;
 
     public GestioneMagazzinoGUI() {
         dataService = new DataService();
-        excelService = new ExcelService();
+        csvService = new CsvService();
         pdfService = new PDFService();
 
         beni = dataService.caricaBeni();
         movimenti = dataService.caricaMovimenti();
         datiStatici = dataService.caricaDatiStatici();
 
-        setTitle("Gestione Magazzino - D.G.M. snc");
+        setTitle("Gestione Magazzino");
         setDefaultCloseOperation(JFrame.EXIT_ON_CLOSE);
         setSize(900, 700);
         setLocationRelativeTo(null);
 
         creaGUI();
+    }
+
+    private void aggiornaComboBoxBeni(JComboBox<String> combo) {
+        combo.removeAllItems();
+        for (Bene bene : beni) {
+            combo.addItem(bene.getNome());
+        }
     }
 
     private void creaGUI() {
@@ -55,6 +61,7 @@ public class GestioneMagazzinoGUI extends JFrame {
         tabbedPane.addTab("Impostazioni", creaPannelloImpostazioni());
 
         add(tabbedPane);
+
     }
 
     private JPanel creaPannelloCarico() {
@@ -74,7 +81,7 @@ public class GestioneMagazzinoGUI extends JFrame {
         JPanel dataPanel = new JPanel(new FlowLayout(FlowLayout.LEFT, 5, 0));
         JTextField dataField = new JTextField(new SimpleDateFormat("dd/MM/yyyy").format(new Date()), 15);
         JButton calendarBtn = new JButton("📅");
-        calendarBtn.addActionListener(e -> {
+        calendarBtn.addActionListener(_ -> {
             Date selectedDate = mostraCalendario(this);
             if (selectedDate != null) {
                 dataField.setText(new SimpleDateFormat("dd/MM/yyyy").format(selectedDate));
@@ -89,9 +96,10 @@ public class GestioneMagazzinoGUI extends JFrame {
         formPanel.add(new JLabel("Materiale:"), gbc);
 
         gbc.gridx = 1;
-        JComboBox<String> beneCombo = new JComboBox<>();
-        aggiornaComboBoxBeni(beneCombo);
-        formPanel.add(beneCombo, gbc);
+
+        JComboBox<String> comboBeneCarico = new JComboBox<>();
+        aggiornaComboBoxBeni(comboBeneCarico);
+        formPanel.add(comboBeneCarico, gbc);
 
         // Quantità
         gbc.gridx = 0; gbc.gridy = 2;
@@ -119,8 +127,8 @@ public class GestioneMagazzinoGUI extends JFrame {
         formPanel.add(noteField, gbc);
 
         // Update unità misura quando cambia bene
-        beneCombo.addActionListener(e -> {
-            String nomeBene = (String) beneCombo.getSelectedItem();
+        comboBeneCarico.addActionListener(_ -> {
+            String nomeBene = (String) comboBeneCarico.getSelectedItem();
             if (nomeBene != null) {
                 Bene bene = trovaBene(nomeBene);
                 if (bene != null) {
@@ -130,8 +138,8 @@ public class GestioneMagazzinoGUI extends JFrame {
         });
 
         // Inizializza unità misura
-        if (beneCombo.getItemCount() > 0) {
-            beneCombo.setSelectedIndex(0);
+        if (comboBeneCarico.getItemCount() > 0) {
+            comboBeneCarico.setSelectedIndex(0);
         }
 
         // Pulsante registra
@@ -140,21 +148,22 @@ public class GestioneMagazzinoGUI extends JFrame {
         registraBtn.setForeground(Color.BLACK);
         registraBtn.setFocusPainted(false);
 
-        registraBtn.addActionListener(e -> {
+        registraBtn.addActionListener(_ -> {
             try {
                 String data = dataField.getText();
-                String nomeBene = (String) beneCombo.getSelectedItem();
+                String nomeBene = (String) comboBeneCarico.getSelectedItem();
                 double quantita = Double.parseDouble(quantitaField.getText());
+                if (quantita < 0) throw new IllegalArgumentException("Il numero non può essere negativo!");
                 String note = noteField.getText();
 
                 Movimento mov = new Movimento(data, nomeBene, quantita, "CARICO", note);
                 movimenti.add(mov);
                 dataService.salvaMovimenti(movimenti);
 
-                salvaInventarioExcel();
+                salvaInventarioCSV();
 
                 JOptionPane.showMessageDialog(this,
-                        "Carico registrato con successo!\nInventario salvato in inventario.xlsx",
+                        "Carico registrato con successo!\nInventario salvato in inventario.csv",
                         "Successo", JOptionPane.INFORMATION_MESSAGE);
 
                 quantitaField.setText("");
@@ -163,6 +172,10 @@ public class GestioneMagazzinoGUI extends JFrame {
             } catch (NumberFormatException ex) {
                 JOptionPane.showMessageDialog(this,
                         "Errore: inserire una quantità valida",
+                        "Errore", JOptionPane.ERROR_MESSAGE);
+            } catch (IllegalArgumentException ex){
+                JOptionPane.showMessageDialog(this,
+                        "Errore: la quantità non può essere negativa",
                         "Errore", JOptionPane.ERROR_MESSAGE);
             } catch (IOException ex) {
                 throw new RuntimeException(ex);
@@ -174,6 +187,26 @@ public class GestioneMagazzinoGUI extends JFrame {
         gbc.insets = new Insets(20, 5, 5, 5);
         formPanel.add(registraBtn, gbc);
 
+        try {
+            // Opzione 1: Carica immagine da file
+            ImageIcon imageIcon = new ImageIcon("src/resources/immagine.png");
+
+            // Ridimensiona l'immagine se necessario
+            Image image = imageIcon.getImage().getScaledInstance(400, 400, Image.SCALE_SMOOTH);
+            imageIcon = new ImageIcon(image);
+
+            JLabel imageLabel = new JLabel(imageIcon);
+            imageLabel.setHorizontalAlignment(JLabel.CENTER);
+            imageLabel.setVerticalAlignment(JLabel.CENTER);
+
+            JPanel imagePanel = new JPanel(new BorderLayout());
+            imagePanel.add(imageLabel, BorderLayout.CENTER);
+            panel.add(imagePanel, BorderLayout.CENTER);
+
+        } catch (Exception e) {
+            System.err.println("Errore nel caricamento dell'immagine: " + e.getMessage());
+        }
+
         panel.add(formPanel, BorderLayout.NORTH);
 
         return panel;
@@ -183,6 +216,31 @@ public class GestioneMagazzinoGUI extends JFrame {
     private JPanel creaPannelloMovimenti() {
         JPanel panel = new JPanel(new BorderLayout(10, 10));
         panel.setBorder(new EmptyBorder(20, 20, 20, 20));
+
+        // Pannello filtri
+        JPanel filterPanel = new JPanel(new FlowLayout(FlowLayout.LEFT, 10, 10));
+        filterPanel.setBorder(BorderFactory.createTitledBorder("Filtri"));
+
+        JLabel materialLabel = new JLabel("Materiale:");
+
+        JComboBox<String> comboBeneMovimenti = new JComboBox<>();
+        aggiornaComboBoxBeni(comboBeneMovimenti);
+        comboBeneMovimenti.addItem("-- Tutti --");
+
+        JLabel dataLabel = new JLabel("Da Data:");
+        JTextField dataStartField = new JTextField(10);
+        dataStartField.setText("dd/MM/yyyy");
+
+        JLabel dataLabel2 = new JLabel("A Data:");
+        JTextField dataEndField = new JTextField(10);
+        dataEndField.setText("dd/MM/yyyy");
+
+        filterPanel.add(materialLabel);
+        filterPanel.add(comboBeneMovimenti);
+        filterPanel.add(dataLabel);
+        filterPanel.add(dataStartField);
+        filterPanel.add(dataLabel2);
+        filterPanel.add(dataEndField);
 
         // Tabella movimenti
         String[] columns = {"Data", "Tipo", "Bene", "Quantità", "Note"};
@@ -194,25 +252,56 @@ public class GestioneMagazzinoGUI extends JFrame {
         };
         JTable table = new JTable(tableModel);
         table.setSelectionMode(ListSelectionModel.SINGLE_SELECTION);
+        table.setRowHeight(25);
 
         // Carica movimenti
         aggiornaTabMovimenti(tableModel);
 
         JScrollPane scrollPane = new JScrollPane(table);
-        panel.add(scrollPane, BorderLayout.CENTER);
+        scrollPane.setVerticalScrollBarPolicy(JScrollPane.VERTICAL_SCROLLBAR_ALWAYS);
+        scrollPane.setHorizontalScrollBarPolicy(JScrollPane.HORIZONTAL_SCROLLBAR_AS_NEEDED);
+
+        // Pannello con filtri e tabella
+        JPanel centerPanel = new JPanel(new BorderLayout(10, 10));
+        centerPanel.add(filterPanel, BorderLayout.NORTH);
+        centerPanel.add(scrollPane, BorderLayout.CENTER);
+
+        panel.add(centerPanel, BorderLayout.CENTER);
 
         // Pannello pulsanti
         JPanel btnPanel = new JPanel(new FlowLayout(FlowLayout.LEFT));
 
+        JButton filtraBtn = new JButton("Filtra");
+        filtraBtn.addActionListener(_ -> {
+            String materiale = (String) comboBeneMovimenti.getSelectedItem();
+            if (materiale != null){
+                if (materiale.equals("-- Tutti --")) {
+                    materiale = "";
+                }
+            }
+            String dataStart = dataStartField.getText().trim();
+            String dataEnd = dataEndField.getText().trim();
+
+            applicaFiltri(tableModel, materiale, dataStart, dataEnd);
+        });
+
+        JButton resetBtn = new JButton("Ripristina");
+        resetBtn.addActionListener(_ -> {
+            comboBeneMovimenti.setSelectedIndex(0);
+            dataStartField.setText("dd/MM/yyyy");
+            dataEndField.setText("dd/MM/yyyy");
+            aggiornaTabMovimenti(tableModel);
+        });
+
         JButton aggiornaBtn = new JButton("Aggiorna");
-        aggiornaBtn.addActionListener(e -> aggiornaTabMovimenti(tableModel));
+        aggiornaBtn.addActionListener(_ -> aggiornaTabMovimenti(tableModel));
 
         JButton eliminaBtn = new JButton("Elimina Selezionato");
         eliminaBtn.setBackground(new Color(220, 220, 220));
         eliminaBtn.setForeground(Color.BLACK);
         eliminaBtn.setFocusPainted(false);
 
-        eliminaBtn.addActionListener(e -> {
+        eliminaBtn.addActionListener(_ -> {
             int selectedRow = table.getSelectedRow();
             if (selectedRow >= 0) {
                 int confirm = JOptionPane.showConfirmDialog(this,
@@ -225,7 +314,7 @@ public class GestioneMagazzinoGUI extends JFrame {
                     movimenti.remove(selectedRow);
                     dataService.salvaMovimenti(movimenti);
                     try {
-                        salvaInventarioExcel();
+                        salvaInventarioCSV();
                     } catch (IOException ex) {
                         throw new RuntimeException(ex);
                     }
@@ -244,12 +333,67 @@ public class GestioneMagazzinoGUI extends JFrame {
             }
         });
 
+        btnPanel.add(filtraBtn);
+        btnPanel.add(resetBtn);
         btnPanel.add(aggiornaBtn);
         btnPanel.add(eliminaBtn);
 
         panel.add(btnPanel, BorderLayout.SOUTH);
 
         return panel;
+    }
+
+    private void applicaFiltri(DefaultTableModel tableModel, String materiale, String dataStart, String dataEnd) {
+        tableModel.setRowCount(0);
+
+        SimpleDateFormat sdf = new SimpleDateFormat("dd/MM/yyyy");
+        Date startDate = null;
+        Date endDate = null;
+
+        // Parse date range
+        try {
+            if (!dataStart.isEmpty() && !dataStart.equals("dd/MM/yyyy")) {
+                startDate = sdf.parse(dataStart);
+            }
+            if (!dataEnd.isEmpty() && !dataEnd.equals("dd/MM/yyyy")) {
+                endDate = sdf.parse(dataEnd);
+            }
+        } catch (ParseException ex) {
+            JOptionPane.showMessageDialog(this,
+                    "Formato data non valido. Usare dd/MM/yyyy",
+                    "Errore",
+                    JOptionPane.ERROR_MESSAGE);
+            return;
+        }
+
+        // Apply filters
+        for (Movimento mov : movimenti) {
+            boolean matchMateriale = materiale.isEmpty() ||
+                    mov.getTipoBene().toLowerCase().contains(materiale.toLowerCase());
+
+            boolean matchData = true;
+            try {
+                Date movData = sdf.parse(mov.getData());
+                if (startDate != null && movData.before(startDate)) {
+                    matchData = false;
+                }
+                if (endDate != null && movData.after(endDate)) {
+                    matchData = false;
+                }
+            } catch (ParseException ex) {
+                matchData = false;
+            }
+
+            if (matchMateriale && matchData) {
+                tableModel.addRow(new Object[]{
+                        mov.getData(),
+                        mov.getTipo(),
+                        mov.getTipoBene(),
+                        mov.getQuantita(),
+                        mov.getNote()
+                });
+            }
+        }
     }
 
     private void aggiornaTabMovimenti(DefaultTableModel tableModel) {
@@ -278,7 +422,7 @@ public class GestioneMagazzinoGUI extends JFrame {
         gbc.gridx = 0; gbc.gridy = 0;
         formPanel.add(new JLabel("Numero Documento:"), gbc);
         gbc.gridx = 1;
-        JTextField numeroField = new JTextField("35", 20);
+        JTextField numeroField = new JTextField("0", 20);
         formPanel.add(numeroField, gbc);
 
         // Data con calendario
@@ -288,7 +432,7 @@ public class GestioneMagazzinoGUI extends JFrame {
         JPanel dataPanel = new JPanel(new FlowLayout(FlowLayout.LEFT, 5, 0));
         JTextField dataField = new JTextField(new SimpleDateFormat("dd/MM/yyyy").format(new Date()), 15);
         JButton calendarBtn = new JButton("📅");
-        calendarBtn.addActionListener(e -> {
+        calendarBtn.addActionListener(_ -> {
             Date selectedDate = mostraCalendario(this);
             if (selectedDate != null) {
                 dataField.setText(new SimpleDateFormat("dd/MM/yyyy").format(selectedDate));
@@ -354,7 +498,7 @@ public class GestioneMagazzinoGUI extends JFrame {
         JPanel inizioPanel = new JPanel(new FlowLayout(FlowLayout.LEFT, 5, 0));
         JTextField inizioField = new JTextField(new SimpleDateFormat("dd/MM/yyyy").format(new Date()), 15);
         JButton calendarBtn2 = new JButton("📅");
-        calendarBtn2.addActionListener(e -> {
+        calendarBtn2.addActionListener(_ -> {
             Date selectedDate = mostraCalendario(this);
             if (selectedDate != null) {
                 inizioField.setText(new SimpleDateFormat("dd/MM/yyyy").format(selectedDate));
@@ -395,17 +539,17 @@ public class GestioneMagazzinoGUI extends JFrame {
         JPanel btnPanel = new JPanel(new FlowLayout(FlowLayout.LEFT));
 
         JButton aggiungiRigaBtn = new JButton("Aggiungi Materiale");
-        aggiungiRigaBtn.addActionListener(e -> {
+        aggiungiRigaBtn.addActionListener(_ -> {
             JPanel addPanel = new JPanel(new GridLayout(4, 2, 5, 5));
 
-            JComboBox<String> beneCombo = new JComboBox<>();
-            aggiornaComboBoxBeni(beneCombo);
+            JComboBox<String> comboBeneTrasporto = new JComboBox<>();
+            aggiornaComboBoxBeni(comboBeneTrasporto);
             JTextField qtaField = new JTextField();
             JTextField descField = new JTextField();
             JLabel umLabel = new JLabel("");
 
-            beneCombo.addActionListener(ev -> {
-                String nomeBene = (String) beneCombo.getSelectedItem();
+            comboBeneTrasporto.addActionListener(_ -> {
+                String nomeBene = (String) comboBeneTrasporto.getSelectedItem();
                 if (nomeBene != null) {
                     Bene bene = trovaBene(nomeBene);
                     if (bene != null) {
@@ -417,12 +561,12 @@ public class GestioneMagazzinoGUI extends JFrame {
                 }
             });
 
-            if (beneCombo.getItemCount() > 0) {
-                beneCombo.setSelectedIndex(0);
+            if (comboBeneTrasporto.getItemCount() > 0) {
+                comboBeneTrasporto.setSelectedIndex(0);
             }
 
             addPanel.add(new JLabel("Bene:"));
-            addPanel.add(beneCombo);
+            addPanel.add(comboBeneTrasporto);
             addPanel.add(new JLabel("Quantità:"));
             addPanel.add(qtaField);
             addPanel.add(new JLabel("Unità Misura:"));
@@ -435,8 +579,9 @@ public class GestioneMagazzinoGUI extends JFrame {
 
             if (result == JOptionPane.OK_OPTION) {
                 try {
-                    String bene = (String) beneCombo.getSelectedItem();
+                    String bene = (String) comboBeneTrasporto.getSelectedItem();
                     double qta = Double.parseDouble(qtaField.getText());
+                    if (qta < 0) throw new IllegalArgumentException("Il numero non può essere negativo!");
                     String um = umLabel.getText();
                     String desc = descField.getText();
 
@@ -444,12 +589,17 @@ public class GestioneMagazzinoGUI extends JFrame {
                 } catch (NumberFormatException ex) {
                     JOptionPane.showMessageDialog(this, "Quantità non valida",
                             "Errore", JOptionPane.ERROR_MESSAGE);
+                } catch (IllegalArgumentException ex){
+                    JOptionPane.showMessageDialog(this,
+                            "Errore: la quantità non può essere negativa",
+                            "Errore", JOptionPane.ERROR_MESSAGE);
                 }
+
             }
         });
 
         JButton rimuoviRigaBtn = new JButton("Rimuovi Selezionato");
-        rimuoviRigaBtn.addActionListener(e -> {
+        rimuoviRigaBtn.addActionListener(_ -> {
             int selectedRow = table.getSelectedRow();
             if (selectedRow >= 0) {
                 tableModel.removeRow(selectedRow);
@@ -469,7 +619,7 @@ public class GestioneMagazzinoGUI extends JFrame {
         generaBtn.setForeground(Color.BLACK);
         generaBtn.setFocusPainted(false);
 
-        generaBtn.addActionListener(e -> {
+        generaBtn.addActionListener(_ -> {
             if (tableModel.getRowCount() == 0) {
                 JOptionPane.showMessageDialog(this,
                         "Aggiungere almeno un materiale",
@@ -516,6 +666,7 @@ public class GestioneMagazzinoGUI extends JFrame {
                 for (int i = 0; i < tableModel.getRowCount(); i++) {
                     String beneName = (String) tableModel.getValueAt(i, 0);
                     double qta = Double.parseDouble(tableModel.getValueAt(i, 1).toString());
+                    if (qta < 0) throw new IllegalArgumentException("Il numero non può essere negativo!");
                     String um = (String) tableModel.getValueAt(i, 2);
                     String desc = (String) tableModel.getValueAt(i, 3);
 
@@ -530,12 +681,12 @@ public class GestioneMagazzinoGUI extends JFrame {
                 dataService.salvaMovimenti(movimenti);
 
                 String timestamp = new SimpleDateFormat("yyyyMMdd_HHmmss").format(new Date());
-                String pdfFile = "DDT_" + numeroField.getText() + "_" + timestamp + ".pdf";
-                String excelFile = "DDT_" + numeroField.getText() + "_" + timestamp + ".xlsx";
+                String pdfFile = "documenti_magazzino\\DDT_" + numeroField.getText() + "_" + timestamp + ".pdf";
+                String csvFile = "documenti_magazzino\\DDT_" + numeroField.getText() + "_" + timestamp + ".csv";
 
                 pdfService.creaDocumentoTrasportoPDF(doc, datiStatici, pdfFile);
-                excelService.creaDocumentoTrasportoExcel(doc, datiStatici, excelFile);
-                salvaInventarioExcel();
+                csvService.creaDocumentoTrasportoCSV(doc, datiStatici, csvFile);
+                salvaInventarioCSV();
 
                 // Cambia tab verso Movimenti
                 tabbedPane.setSelectedIndex(2); // Tab Movimenti
@@ -544,8 +695,8 @@ public class GestioneMagazzinoGUI extends JFrame {
                         "Documento di trasporto generato con successo!\n\n" +
                                 "File creati:\n" +
                                 "- " + pdfFile + "\n" +
-                                "- " + excelFile + "\n\n" +
-                                "Movimenti registrati e inventario aggiornato (inventario.xlsx)",
+                                "- " + csvFile + "\n\n" +
+                                "Movimenti registrati e inventario aggiornato (inventario.csv)",
                         "Documento Creato",
                         JOptionPane.INFORMATION_MESSAGE);
 
@@ -576,17 +727,18 @@ public class GestioneMagazzinoGUI extends JFrame {
         JPanel topPanel = new JPanel(new FlowLayout(FlowLayout.LEFT));
         topPanel.add(new JLabel("Visualizza bene:"));
 
-        JComboBox<String> filtroCombo = new JComboBox<>();
-        filtroCombo.addItem("TUTTI");
-        aggiornaComboBoxBeni(filtroCombo);
-        topPanel.add(filtroCombo);
+        JComboBox<String> comboBeneInventario = new JComboBox<>();
+        aggiornaComboBoxBeni(comboBeneInventario);
+        comboBeneInventario.addItem("-- Tutti --");
+
+        topPanel.add(comboBeneInventario);
 
         JButton aggiornaBtn = new JButton("Aggiorna");
         topPanel.add(aggiornaBtn);
 
         panel.add(topPanel, BorderLayout.NORTH);
 
-        String[] columns = {"Bene", "Unità Misura", "Giacenza Totale"};
+        String[] columns = {"Bene", "Unità Misura", "Giacenza"};
         DefaultTableModel tableModel = new DefaultTableModel(columns, 0) {
             @Override
             public boolean isCellEditable(int row, int column) {
@@ -595,13 +747,13 @@ public class GestioneMagazzinoGUI extends JFrame {
         };
         JTable table = new JTable(tableModel);
 
-        aggiornaBtn.addActionListener(e -> {
+        aggiornaBtn.addActionListener(_ -> {
             tableModel.setRowCount(0);
-            String filtro = (String) filtroCombo.getSelectedItem();
+            String filtro = (String) comboBeneInventario.getSelectedItem();
             Map<String, Double> giacenze = calcolaGiacenze();
 
             for (Bene bene : beni) {
-                if ("TUTTI".equals(filtro) || bene.getNome().equals(filtro)) {
+                if ("-- Tutti --".equals(filtro) || bene.getNome().equals(filtro)) {
                     double giacenza = giacenze.getOrDefault(bene.getNome(), 0.0);
                     tableModel.addRow(new Object[]{
                             bene.getNome(),
@@ -619,15 +771,15 @@ public class GestioneMagazzinoGUI extends JFrame {
         panel.add(scrollPane, BorderLayout.CENTER);
 
         JPanel bottomPanel = new JPanel(new FlowLayout());
-        JButton esportaBtn = new JButton("Esporta in Excel");
-        esportaBtn.addActionListener(e -> {
+        JButton esportaBtn = new JButton("Esporta in CSV");
+        esportaBtn.addActionListener(_ -> {
             try {
-                salvaInventarioExcel();
+                salvaInventarioCSV();
             } catch (IOException ex) {
                 throw new RuntimeException(ex);
             }
             JOptionPane.showMessageDialog(this,
-                    "Inventario esportato in inventario.xlsx",
+                    "Inventario esportato in inventario.csv",
                     "Successo", JOptionPane.INFORMATION_MESSAGE);
         });
         bottomPanel.add(esportaBtn);
@@ -655,7 +807,7 @@ public class GestioneMagazzinoGUI extends JFrame {
         JPanel btnPanel = new JPanel(new FlowLayout());
 
         JButton aggiungiBtn = new JButton("Aggiungi Nuovo Bene");
-        aggiungiBtn.addActionListener(e -> {
+        aggiungiBtn.addActionListener(_ -> {
             JPanel addPanel = new JPanel(new GridLayout(2, 2, 5, 5));
             JTextField nomeField = new JTextField();
             JTextField umField = new JTextField();
@@ -669,24 +821,38 @@ public class GestioneMagazzinoGUI extends JFrame {
                     "Nuovo Bene", JOptionPane.OK_CANCEL_OPTION);
 
             if (result == JOptionPane.OK_OPTION) {
-                String nome = nomeField.getText().trim();
-                String um = umField.getText().trim();
+                try{
+                    String nome = nomeField.getText().trim();
+                    String um = umField.getText().trim();
+                    for (int i = 1; i < beni.size(); i++) {
+                        if (Objects.equals(beni.get(i).getNome(), nome)){
+                            throw new IllegalArgumentException();
+                        }
+                    }
+                    if (!nome.isEmpty() && !um.isEmpty()) {
+                        Bene nuovoBene = new Bene(nome, um);
+                        beni.add(nuovoBene);
+                        dataService.salvaBeni(beni);
+                        tableModel.addRow(new Object[]{nome, um});
 
-                if (!nome.isEmpty() && !um.isEmpty()) {
-                    Bene nuovoBene = new Bene(nome, um);
-                    beni.add(nuovoBene);
-                    dataService.salvaBeni(beni);
-                    tableModel.addRow(new Object[]{nome, um});
+                        //TODO aggiorna in automatico comboBeneCarico, comboBeneMovimenti, comboBeneTrasporto, comboBeneInventario
 
+                        JOptionPane.showMessageDialog(this,
+                                "Bene aggiunto con successo",
+                                "Successo", JOptionPane.INFORMATION_MESSAGE);
+                    }
+                } catch (IllegalArgumentException ex){
                     JOptionPane.showMessageDialog(this,
-                            "Bene aggiunto con successo",
-                            "Successo", JOptionPane.INFORMATION_MESSAGE);
+                            "Nome del bene già presente",
+                            "Errore",
+                            JOptionPane.ERROR_MESSAGE);
+                    ex.printStackTrace();
                 }
             }
         });
 
         JButton eliminaBtn = new JButton("Elimina Selezionato");
-        eliminaBtn.addActionListener(e -> {
+        eliminaBtn.addActionListener(_ -> {
             int selectedRow = table.getSelectedRow();
             if (selectedRow >= 0) {
                 int confirm = JOptionPane.showConfirmDialog(this,
@@ -761,7 +927,7 @@ public class GestioneMagazzinoGUI extends JFrame {
         salvaBtn.setForeground(Color.BLACK);
         salvaBtn.setFocusPainted(false);
 
-        salvaBtn.addActionListener(e -> {
+        salvaBtn.addActionListener(_ -> {
             datiStatici.setRagioneSociale(ragioneSocialeField.getText());
             datiStatici.setIndirizzo(indirizzoField.getText());
             datiStatici.setCap(capField.getText());
@@ -784,13 +950,6 @@ public class GestioneMagazzinoGUI extends JFrame {
         panel.add(formPanel, BorderLayout.NORTH);
 
         return panel;
-    }
-
-    private void aggiornaComboBoxBeni(JComboBox<String> combo) {
-        combo.removeAllItems();
-        for (Bene bene : beni) {
-            combo.addItem(bene.getNome());
-        }
     }
 
     private Bene trovaBene(String nome) {
@@ -817,10 +976,9 @@ public class GestioneMagazzinoGUI extends JFrame {
         return giacenze;
     }
 
-    private void salvaInventarioExcel() throws IOException {
+    private void salvaInventarioCSV() throws IOException {
         Map<String, Double> giacenze = calcolaGiacenze();
-        Workbook workbook = new XSSFWorkbook();
-        excelService.salvaInventario(beni, giacenze, "inventario.xlsx");
+        csvService.salvaInventario(beni, giacenze, "inventario.csv");
     }
 
     // Metodo per mostrare un calendario e selezionare una data
@@ -848,7 +1006,7 @@ public class GestioneMagazzinoGUI extends JFrame {
         topPanel.add(yearSpinner);
 
         // Pannello calendario
-        JPanel calendarPanel = new JPanel(new GridLayout(7, 7, 2, 2));
+        JPanel calendarPanel = new JPanel(new GridLayout(0, 7, 2, 2));
 
         // Aggiorna calendario
         Runnable aggiornaCalendario = () -> {
@@ -879,7 +1037,7 @@ public class GestioneMagazzinoGUI extends JFrame {
             for (int day = 1; day <= maxDay; day++) {
                 JButton dayBtn = new JButton(String.valueOf(day));
                 final int finalDay = day;
-                dayBtn.addActionListener(e -> {
+                dayBtn.addActionListener(_ -> {
                     calendar.set(Calendar.DAY_OF_MONTH, finalDay);
                     selectedDate[0] = calendar.getTime();
                     dialog.dispose();
@@ -891,19 +1049,19 @@ public class GestioneMagazzinoGUI extends JFrame {
             calendarPanel.repaint();
         };
 
-        meseCombo.addActionListener(e -> aggiornaCalendario.run());
-        yearSpinner.addChangeListener(e -> aggiornaCalendario.run());
+        meseCombo.addActionListener(_ -> aggiornaCalendario.run());
+        yearSpinner.addChangeListener(_ -> aggiornaCalendario.run());
 
         aggiornaCalendario.run();
 
         JPanel bottomPanel = new JPanel(new FlowLayout());
         JButton oggiBtn = new JButton("Oggi");
-        oggiBtn.addActionListener(e -> {
+        oggiBtn.addActionListener(_ -> {
             selectedDate[0] = new Date();
             dialog.dispose();
         });
         JButton annullaBtn = new JButton("Annulla");
-        annullaBtn.addActionListener(e -> {
+        annullaBtn.addActionListener(_ -> {
             selectedDate[0] = null;
             dialog.dispose();
         });
